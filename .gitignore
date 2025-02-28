@@ -1,0 +1,8 @@
+# ESP-IDF
+/build/
+/managed_components/
+sdkconfig
+
+# ignore certificates
+/main/certs/*
+!/main/certs/.gitkeep
