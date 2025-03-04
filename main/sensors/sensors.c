@@ -81,7 +81,7 @@ void app_sensors_init(void) {
     gpio_isr_handler_add(FLOW_SENSOR_PIN, flow_sensor_isr_handler, NULL);
 }
 
-void app_sensors_read(sensors_data_point_t* data) {
+void app_sensors_read(app_sensors_sample_t* data) {
 
     /* PRESSURE */
     int raw_pressure;

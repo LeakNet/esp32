@@ -14,15 +14,26 @@
 #include <wifi_provisioning/scheme_ble.h>
 
 #include "common.h"
+#include "mqtt.h"
+#include <protocomm_security.h>
+#include <protocomm_security1.h>
+
+#include "esp_chip_info.h"
 
 static const char* TAG = "prov";
 
-#define BLE_ENDPOINT_NAME "user"
+#define PROV_DEVICE_ID_ENDPOINT_NAME "device-id"
+/* Signal Wi-Fi events on this event-group */
+// const int WIFI_CONNECTED_EVENT = BIT0;
+#define MAX_RETRIES 5
+static int connection_retries = 0;
+
 
 static void get_device_service_name(char *service_name, size_t max)
 {
     uint8_t eth_mac[6];
-    const char *ssid_prefix = "PROV_";
+    const char *ssid_prefix = "Irrigo ESP32-";
+
     esp_wifi_get_mac(WIFI_IF_STA, eth_mac);
     snprintf(service_name, max, "%s%02X%02X%02X",
              ssid_prefix, eth_mac[3], eth_mac[4], eth_mac[5]);
@@ -36,18 +47,26 @@ void app_wifi_init() {
 }
 
 
-static esp_err_t custom_endpoint_handler(uint32_t session_id, const uint8_t *inbuf, ssize_t inlen,
-    uint8_t **outbuf, ssize_t *outlen, void *priv_data)
+static esp_err_t device_id_endpoint_handler(uint32_t session_id, const uint8_t *inbuf, ssize_t inlen,
+                                                uint8_t **outbuf, ssize_t *outlen, void *priv_data)
 {
     if (inbuf) {
+        // Input for setting up mqtt config
         ESP_LOGI(TAG, "Received data: %.*s", inlen, (char *)inbuf);
     }
 
-    app_nvs_save_str(NVS_USER_ID_KEY, (char*)inbuf);
+    char client_id[11];
+    size_t client_id_length;
+    app_nvs_get_str(MQTT_CLIENT_ID_NVS_KEY, client_id, &client_id_length);
 
-    char response[] = "OK";
-    *outbuf = (uint8_t *)strdup(response);
-    *outlen = strlen(response) + 1;
+    ESP_LOGI(TAG, "%s, %d", client_id, client_id_length);
+
+    *outbuf = (uint8_t *)strdup(client_id);
+    if (*outbuf == NULL) {
+        ESP_LOGE(TAG, "System out of memory");
+        return ESP_ERR_NO_MEM;
+    }
+    *outlen = client_id_length; /* +1 for NULL terminating byte */
 
     return ESP_OK;
 }
@@ -79,13 +98,10 @@ void print_uuid(const uint8_t uuid[16]) {
 void app_prov_start() {
     ESP_LOGI(TAG, "Starting provisioning");
 
-    char service_name[12];
+    char service_name[19];
     get_device_service_name(service_name, sizeof(service_name));
     
-    // wifi_prov_security_t security = WIFI_PROV_SECURITY_1;
-    // const char *pop = "abcd1234";
-    // wifi_prov_security1_params_t *sec_params = pop;
-
+    
     wifi_prov_security_t security = WIFI_PROV_SECURITY_0;
 
     uint8_t custom_service_uuid[] = {
@@ -99,21 +115,86 @@ void app_prov_start() {
 
     wifi_prov_scheme_ble_set_service_uuid(custom_service_uuid);
 
-    wifi_prov_mgr_endpoint_create(BLE_ENDPOINT_NAME);
+    wifi_prov_mgr_endpoint_create(PROV_DEVICE_ID_ENDPOINT_NAME);
 
     /* Do not stop and de-init provisioning even after success,
     * so that we can restart it later. */
-    wifi_prov_mgr_disable_auto_stop(1000);
+    wifi_prov_mgr_disable_auto_stop(0);
 
     /* Start provisioning service */
-    // ESP_ERROR_CHECK(wifi_prov_mgr_start_provisioning(security, (const void *) sec_params, service_name, NULL));
     ESP_ERROR_CHECK(wifi_prov_mgr_start_provisioning(security, NULL, service_name, NULL));
 
-    wifi_prov_mgr_endpoint_register(BLE_ENDPOINT_NAME, custom_endpoint_handler, NULL);
+    wifi_prov_mgr_endpoint_register(PROV_DEVICE_ID_ENDPOINT_NAME, device_id_endpoint_handler, NULL);
 }
 
 void app_prov_stop() {
     wifi_prov_mgr_stop_provisioning();
     wifi_prov_mgr_deinit();
     ESP_LOGI(TAG, "Provisioning stopped");
+}
+
+
+/* Event handler for catching system events */
+void prov_event_handler(void* arg, esp_event_base_t event_base,
+                          int32_t event_id, void* event_data)
+{
+    if (event_base == WIFI_PROV_EVENT) {
+        switch (event_id) {
+            case WIFI_PROV_START:
+                ESP_LOGI(TAG, "Provisioning started");
+                // Clean up custom endpoint
+                // app_nvs_erase_key(BLE_ENDPOINT_NAME);
+                break;
+            case WIFI_PROV_CRED_RECV: {
+                wifi_sta_config_t *wifi_sta_cfg = (wifi_sta_config_t *)event_data;
+                ESP_LOGI(TAG, "Received Wi-Fi credentials"
+                         "\n\tSSID     : %s\n\tPassword : %s",
+                         (const char *) wifi_sta_cfg->ssid,
+                         (const char *) wifi_sta_cfg->password);
+                break;
+            }
+            case WIFI_PROV_CRED_FAIL: {
+                wifi_prov_sta_fail_reason_t *reason = (wifi_prov_sta_fail_reason_t *)event_data;
+                ESP_LOGE(TAG, "Provisioning failed!\n\tReason : %s"
+                         "\n\tPlease reset to factory and retry provisioning",
+                         (*reason == WIFI_PROV_STA_AUTH_ERROR) ?
+                         "Wi-Fi station authentication failed" : "Wi-Fi access-point not found");
+                wifi_prov_mgr_reset_sm_state_on_failure();
+                break;
+            }
+            case WIFI_PROV_CRED_SUCCESS:
+                ESP_LOGI(TAG, "Provisioning successful");
+                break;
+            case WIFI_PROV_END: {
+                wifi_prov_mgr_deinit();
+                break;
+            }
+            default:
+                break;
+        }
+    } else if (event_base == WIFI_EVENT) {
+        switch (event_id) {
+            case WIFI_EVENT_STA_START:
+                esp_wifi_connect();
+                break;
+            case WIFI_EVENT_STA_DISCONNECTED:
+                if (++connection_retries >= MAX_RETRIES) {
+                    ESP_LOGI(TAG, "Max retries reached. Restarting provisioning");
+                    app_prov_stop();
+                    app_prov_init();
+                    app_prov_start();
+                } else {
+                    ESP_LOGI(TAG, "Reconnecting to WiFi...");
+                    esp_wifi_connect();
+                }
+                break;
+            default:
+                break;
+        }
+    } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
+        ip_event_got_ip_t* event = (ip_event_got_ip_t*) event_data;
+        ESP_LOGI(TAG, "Connected with IP Address:" IPSTR, IP2STR(&event->ip_info.ip));
+        /* Signal main application to continue execution */
+        xEventGroupSetBits(wifi_event_group, WIFI_CONNECTED_EVENT);
+    }
 }
