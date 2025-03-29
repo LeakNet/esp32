@@ -50,16 +50,9 @@ void app_wifi_init() {
 static esp_err_t device_id_endpoint_handler(uint32_t session_id, const uint8_t *inbuf, ssize_t inlen,
                                                 uint8_t **outbuf, ssize_t *outlen, void *priv_data)
 {
-    if (inbuf) {
-        // Input for setting up mqtt config
-        ESP_LOGI(TAG, "Received data: %.*s", inlen, (char *)inbuf);
-    }
-
     char client_id[11];
     size_t client_id_length;
-    app_nvs_get_str(MQTT_CLIENT_ID_NVS_KEY, client_id, &client_id_length);
-
-    ESP_LOGI(TAG, "%s, %d", client_id, client_id_length);
+    app_get_device_id(client_id, &client_id_length);
 
     *outbuf = (uint8_t *)strdup(client_id);
     if (*outbuf == NULL) {
@@ -76,13 +69,14 @@ void app_prov_init() {
     /* Configuration for the provisioning manager */
     wifi_prov_mgr_config_t config = {
         .wifi_prov_conn_cfg = {
-           .wifi_conn_attempts =  CONFIG_EXAMPLE_PROV_MGR_CONNECTION_CNT,
+           .wifi_conn_attempts =  3,
         },
         .scheme = wifi_prov_scheme_ble,
         // .scheme_event_handler = WIFI_PROV_SCHEME_BLE_EVENT_HANDLER_FREE_BTDM
         // .app_event_handler = wifi_prov_event_handler,
     };
     ESP_ERROR_CHECK(wifi_prov_mgr_init(config));
+    wifi_prov_mgr_disable_auto_stop(5000);
 }
 
 void print_uuid(const uint8_t uuid[16]) {
@@ -98,11 +92,14 @@ void print_uuid(const uint8_t uuid[16]) {
 void app_prov_start() {
     ESP_LOGI(TAG, "Starting provisioning");
 
-    char service_name[19];
+    char service_name[21];
     get_device_service_name(service_name, sizeof(service_name));
     
     
-    wifi_prov_security_t security = WIFI_PROV_SECURITY_0;
+    wifi_prov_security_t security = WIFI_PROV_SECURITY_1;
+    const char *pop = NULL;
+    wifi_prov_security1_params_t *sec_params = pop;
+
 
     uint8_t custom_service_uuid[] = {
         /* LSB <---------------------------------------
@@ -119,10 +116,9 @@ void app_prov_start() {
 
     /* Do not stop and de-init provisioning even after success,
     * so that we can restart it later. */
-    wifi_prov_mgr_disable_auto_stop(0);
 
     /* Start provisioning service */
-    ESP_ERROR_CHECK(wifi_prov_mgr_start_provisioning(security, NULL, service_name, NULL));
+    ESP_ERROR_CHECK(wifi_prov_mgr_start_provisioning(security, (const void *) sec_params, service_name, NULL));
 
     wifi_prov_mgr_endpoint_register(PROV_DEVICE_ID_ENDPOINT_NAME, device_id_endpoint_handler, NULL);
 }
@@ -133,7 +129,6 @@ void app_prov_stop() {
     ESP_LOGI(TAG, "Provisioning stopped");
 }
 
-
 /* Event handler for catching system events */
 void prov_event_handler(void* arg, esp_event_base_t event_base,
                           int32_t event_id, void* event_data)
@@ -142,8 +137,6 @@ void prov_event_handler(void* arg, esp_event_base_t event_base,
         switch (event_id) {
             case WIFI_PROV_START:
                 ESP_LOGI(TAG, "Provisioning started");
-                // Clean up custom endpoint
-                // app_nvs_erase_key(BLE_ENDPOINT_NAME);
                 break;
             case WIFI_PROV_CRED_RECV: {
                 wifi_sta_config_t *wifi_sta_cfg = (wifi_sta_config_t *)event_data;
@@ -159,6 +152,7 @@ void prov_event_handler(void* arg, esp_event_base_t event_base,
                          "\n\tPlease reset to factory and retry provisioning",
                          (*reason == WIFI_PROV_STA_AUTH_ERROR) ?
                          "Wi-Fi station authentication failed" : "Wi-Fi access-point not found");
+                vTaskDelay(3000 / portTICK_PERIOD_MS);
                 wifi_prov_mgr_reset_sm_state_on_failure();
                 break;
             }
@@ -178,15 +172,20 @@ void prov_event_handler(void* arg, esp_event_base_t event_base,
                 esp_wifi_connect();
                 break;
             case WIFI_EVENT_STA_DISCONNECTED:
+                ESP_LOGI(TAG, "Wi-Fi disconnected, retrying connection...");
+                xEventGroupClearBits(app_event_group, WIFI_CONNECTED_BIT);
+
                 if (++connection_retries >= MAX_RETRIES) {
                     ESP_LOGI(TAG, "Max retries reached. Restarting provisioning");
-                    app_prov_stop();
-                    app_prov_init();
-                    app_prov_start();
+                    connection_retries = 0;
+                    wifi_prov_mgr_reset_sm_state_for_reprovision();
+                    // wifi_prov_mgr_reset_provisioning();
+                    // esp_restart();
                 } else {
                     ESP_LOGI(TAG, "Reconnecting to WiFi...");
                     esp_wifi_connect();
                 }
+                vTaskDelay(10000 / portTICK_PERIOD_MS);
                 break;
             default:
                 break;
@@ -194,7 +193,6 @@ void prov_event_handler(void* arg, esp_event_base_t event_base,
     } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
         ip_event_got_ip_t* event = (ip_event_got_ip_t*) event_data;
         ESP_LOGI(TAG, "Connected with IP Address:" IPSTR, IP2STR(&event->ip_info.ip));
-        /* Signal main application to continue execution */
-        xEventGroupSetBits(wifi_event_group, WIFI_CONNECTED_EVENT);
+        xEventGroupSetBits(app_event_group, WIFI_CONNECTED_BIT);
     }
 }

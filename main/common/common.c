@@ -2,6 +2,7 @@
 #include "esp_log.h"
 #include "nvs.h"
 #include "common.h"
+#include "mqtt.h"
 
 static const char* TAG = "COMMON";
 
@@ -69,4 +70,8 @@ esp_err_t app_nvs_get_str(const char *key, char *out_value, size_t *length) {
 
     nvs_close(nvs_handle);
     return ESP_OK;
+}
+
+esp_err_t app_get_device_id(char* out, size_t* length) {
+    return app_nvs_get_str(MQTT_CLIENT_ID_NVS_KEY, out, length);
 }

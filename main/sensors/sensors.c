@@ -6,7 +6,13 @@
 #include "sys/time.h"
 #include "esp_timer.h"
 
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
+#include <freertos/event_groups.h>
+
 #include "sensors.h"
+#include "mqtt.h"
+#include "common.h"
 
 static const char* TAG = "sensors";
 
@@ -98,6 +104,26 @@ void app_sensors_read(app_sensors_sample_t* data) {
     ESP_LOGI(TAG, "Timestamp: %llu, Pressure: %.4f MPa, Flow: %.4f Liter/Minute", data->timestamp, data->pressure, data->flow);
 
     flow_sensor_pulse_count = 0;
+}
+
+void app_sensors_task(void *pvParameters) {
+    uint32_t samples_per_batch = ((uint32_t)pvParameters);
+    app_sensors_sample_t sample[samples_per_batch];
+    int idx = 0;
+
+    while (1) {
+        xEventGroupWaitBits(app_event_group, MQTT_CONNECTED_BIT, pdFALSE, pdFALSE, portMAX_DELAY);
+
+        app_sensors_read(&sample[idx]);
+        idx++;
+
+        if (idx == samples_per_batch) {
+            app_mqtt_send_sensor_data(sample, samples_per_batch);
+            idx = 0;
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(MEASUREMENT_INTERVAL_MS));
+    }
 }
 
 static bool adc_calibration_init(adc_unit_t unit, adc_channel_t channel, adc_atten_t atten, adc_cali_handle_t *out_handle) {

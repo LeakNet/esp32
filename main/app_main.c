@@ -24,10 +24,12 @@
 #include "mbedtls/esp_debug.h"
 #include "esp_mac.h"
 
+#include "cJSON.h"
+#include "zlib.h"
+
 static const char *TAG = "app";
 
 EventGroupHandle_t app_event_group = NULL;
-EventGroupHandle_t wifi_event_group = NULL;
 
 static void wifi_init_sta(void)
 {
@@ -46,35 +48,30 @@ void nvs_init() {
     }
 }
 
+
 void app_main(void)
 {
-    
+    esp_log_level_set("*", ESP_LOG_VERBOSE); // Set all logs to verbose
+
     /* Initialize NVS partition */
     nvs_init();
 
-    char client_id[11];
     uint8_t eth_mac[6];
-    const char *client_id_prefix = "ESP-";
     esp_read_mac(eth_mac, ESP_MAC_WIFI_STA);
+
+    char client_id[11];
+    const char *client_id_prefix = "ESP-";
     snprintf(client_id, sizeof(client_id), "%s%02X%02X%02X",
             client_id_prefix, eth_mac[3], eth_mac[4], eth_mac[5]);
-
-    ESP_LOGI(TAG, "Client id: %s", client_id);
-
     app_nvs_save_str(MQTT_CLIENT_ID_NVS_KEY, client_id);
-
-    char test[11];
-    size_t test_size;
-    app_nvs_get_str(MQTT_CLIENT_ID_NVS_KEY, test, &test_size);
-    ESP_LOGI(TAG, "Client id: %s", test);
 
     /* Initialize TCP/IP */
     ESP_ERROR_CHECK(esp_netif_init());
 
     /* Initialize the event loop */
     ESP_ERROR_CHECK(esp_event_loop_create_default());
-    wifi_event_group = xEventGroupCreate();
-    if (wifi_event_group == NULL) {
+    app_event_group = xEventGroupCreate();
+    if (app_event_group == NULL) {
         ESP_LOGE(TAG, "Failed to create event group!");
         return;
     }
@@ -84,12 +81,6 @@ void app_main(void)
     ESP_ERROR_CHECK(esp_event_handler_register(PROTOCOMM_TRANSPORT_BLE_EVENT, ESP_EVENT_ANY_ID, &prov_event_handler, NULL));
     ESP_ERROR_CHECK(esp_event_handler_register(PROTOCOMM_SECURITY_SESSION_EVENT, ESP_EVENT_ANY_ID, &prov_event_handler, NULL));
     ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &prov_event_handler, NULL));
-
-    app_event_group = xEventGroupCreate();
-    if (app_event_group == NULL) {
-        ESP_LOGE(TAG, "Failed to create event group!");
-        return;
-    }
     
     app_sntp_init();
     app_sensors_init();
@@ -98,39 +89,30 @@ void app_main(void)
     app_prov_init();
 
     bool provisioned = false;
-#ifdef CONFIG_EXAMPLE_RESET_PROVISIONED
-    wifi_prov_mgr_reset_provisioning();
-#else
-    /* Let's find out if the device is provisioned */
     ESP_ERROR_CHECK(wifi_prov_mgr_is_provisioned(&provisioned));
 
-#endif
-
-    /* If device is not yet provisioned start provisioning service */
     if (!provisioned) {
         app_prov_start();
     } else {
         ESP_LOGI(TAG, "Already provisioned, starting Wi-Fi STA");
-
-        /* We don't need the manager as device is already provisioned,
-         * so let's release it's resources */
         app_prov_stop();
-
         ESP_ERROR_CHECK(esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, &prov_event_handler, NULL));
-        /* Start Wi-Fi station */
         wifi_init_sta();
     }
 
     /* Wait for Wi-Fi connection */
-    xEventGroupWaitBits(wifi_event_group, WIFI_CONNECTED_EVENT, true, true, portMAX_DELAY);
+    xEventGroupWaitBits(app_event_group, WIFI_CONNECTED_BIT, true, true, portMAX_DELAY);
 
     ESP_LOGI(TAG, "Connected to wifi");
 
-
-    /* Resetting provisioning state machine to enable re-provisioning */
-    // wifi_prov_mgr_reset_sm_state_for_reprovision();
-
     app_sntp_start();
-
     app_mqtt_start();
+
+    xTaskCreate(
+        app_sensors_task,
+        "sensors_task",
+        8192,
+        (void*)30, // number of samples per MQTT message
+        5,
+        NULL);
 }

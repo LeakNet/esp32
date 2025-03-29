@@ -1,7 +1,8 @@
 # ESP-IDF
 /build/
 /managed_components/
-sdkconfig
+sdkconfig.old
+
 
 # ignore certificates
 /main/certs/*

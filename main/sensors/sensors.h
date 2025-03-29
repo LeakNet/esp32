@@ -13,5 +13,6 @@ typedef struct app_sensors_sample_t {
 
 void app_sensors_init(void);
 void app_sensors_read(app_sensors_sample_t*);
+void app_sensors_task(void *pvParameters);
 
 #endif

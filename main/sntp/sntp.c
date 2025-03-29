@@ -12,13 +12,15 @@
 #include "esp_netif_sntp.h"
 #include "lwip/ip_addr.h"
 
+#include "esp_sntp.h"
+
 #include "common.h"
 
 static const char* TAG = "sntp";
 
 void sntp_sync_notification_cb(struct timeval *tv) {
     ESP_LOGI(TAG, "System time synchronized.");
-    xEventGroupSetBits(app_event_group, TIME_SYNCED_EVENT);
+    xEventGroupSetBits(app_event_group, TIME_SYNCED_BIT);
 }
 
 void app_sntp_init(void) {
