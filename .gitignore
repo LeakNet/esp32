@@ -2,7 +2,8 @@
 /build/
 /managed_components/
 sdkconfig.old
-
+dependencies.lock
+sdkconfig
 
 # ignore certificates
 /main/certs/*

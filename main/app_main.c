@@ -24,9 +24,6 @@
 #include "mbedtls/esp_debug.h"
 #include "esp_mac.h"
 
-#include "cJSON.h"
-#include "zlib.h"
-
 static const char *TAG = "app";
 
 EventGroupHandle_t app_event_group = NULL;
@@ -51,7 +48,7 @@ void nvs_init() {
 
 void app_main(void)
 {
-    esp_log_level_set("*", ESP_LOG_VERBOSE); // Set all logs to verbose
+    // esp_log_level_set("*", ESP_LOG_VERBOSE); // Set all logs to verbose
 
     /* Initialize NVS partition */
     nvs_init();
@@ -108,11 +105,20 @@ void app_main(void)
     app_sntp_start();
     app_mqtt_start();
 
-    xTaskCreate(
-        app_sensors_task,
-        "sensors_task",
+    BaseType_t xReturned;
+    TaskHandle_t xHandle = NULL;
+
+    xReturned = xTaskCreate(
+        app_mqtt_task,
+        "mqtt_task",
         8192,
-        (void*)30, // number of samples per MQTT message
+        NULL,
         5,
-        NULL);
+        &xHandle);
+
+    if (xReturned != pdPASS) {
+        ESP_LOGE(TAG, "Failed to create MQTT task");
+    } else {
+        ESP_LOGI(TAG, "MQTT task created successfully");
+    }
 }

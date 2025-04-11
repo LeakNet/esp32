@@ -1,0 +1,12 @@
+syntax = "proto3";
+
+message Sample {
+    uint64 timestamp = 1;
+    float flow = 2;
+    float pressure = 3;
+}
+
+message SampleBatch {
+    repeated Sample samples = 1;
+}
+

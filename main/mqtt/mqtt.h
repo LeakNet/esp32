@@ -14,6 +14,6 @@ extern esp_mqtt_client_handle_t client;
 
 void app_mqtt_init(void);
 void app_mqtt_start(void);
-void app_mqtt_send_sensor_data(app_sensors_sample_t*, size_t);
+void app_mqtt_task(void *pvParameters);
 
 #endif

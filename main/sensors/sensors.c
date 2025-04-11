@@ -11,8 +11,8 @@
 #include <freertos/event_groups.h>
 
 #include "sensors.h"
-#include "mqtt.h"
 #include "common.h"
+#include "sample_batch.pb.h"
 
 static const char* TAG = "sensors";
 
@@ -46,14 +46,24 @@ static adc_cali_handle_t pressure_sensor_cali_handle;
 
 static bool adc_calibration_init(adc_unit_t unit, adc_channel_t channel, adc_atten_t atten, adc_cali_handle_t *out_handle);
 
+float fround(float val) {
+    int charsNeeded = 1 + snprintf(NULL, 0, "%.3f", val);
+    char* buffer = malloc(charsNeeded);
+    snprintf(buffer, charsNeeded, "%.3f", val);
+    double result = atof(buffer);
+    free(buffer);
+    return result;
+}
+
 float normalize_pressure(int pressure_raw) {
     float pressure = ((float)pressure_raw / PRESSURE_SENSOR_ADC_MAX_VALUE) * PRESSURE_RANGE;
-    return pressure;
+    return fround(pressure);
 }
 
 float normalize_flow(uint32_t pulse_count) {
     float flow = ((float)pulse_count / (MEASUREMENT_INTERVAL_MS / 1000.0)) / FLOW_SENSOR_PULSES_PER_LITER;
-    return flow / MAX_FLOW;
+    flow = flow / MAX_FLOW;
+    return fround(flow);
 }
 
 // Function to Initialize Pressure Sensor ADC
@@ -87,7 +97,7 @@ void app_sensors_init(void) {
     gpio_isr_handler_add(FLOW_SENSOR_PIN, flow_sensor_isr_handler, NULL);
 }
 
-void app_sensors_read(app_sensors_sample_t* data) {
+void app_sensors_read(Sample* sample) {
 
     /* PRESSURE */
     int raw_pressure;
@@ -97,33 +107,13 @@ void app_sensors_read(app_sensors_sample_t* data) {
     struct timeval tv;
     gettimeofday(&tv, NULL);
 
-    data->timestamp = ((uint64_t)tv.tv_sec * 1000);
-    data->pressure = normalize_pressure(raw_pressure);
-    data->flow = normalize_flow(flow_sensor_pulse_count);
+    sample->timestamp = ((uint64_t)tv.tv_sec * 1000);
+    sample->pressure = normalize_pressure(raw_pressure);
+    sample->flow = normalize_flow(flow_sensor_pulse_count);
 
-    ESP_LOGI(TAG, "Timestamp: %llu, Pressure: %.4f MPa, Flow: %.4f Liter/Minute", data->timestamp, data->pressure, data->flow);
+    ESP_LOGI(TAG, "Timestamp: %llu, Pressure: %.4f MPa, Flow: %.4f Liter/Minute", sample->timestamp, sample->pressure, sample->flow);
 
     flow_sensor_pulse_count = 0;
-}
-
-void app_sensors_task(void *pvParameters) {
-    uint32_t samples_per_batch = ((uint32_t)pvParameters);
-    app_sensors_sample_t sample[samples_per_batch];
-    int idx = 0;
-
-    while (1) {
-        xEventGroupWaitBits(app_event_group, MQTT_CONNECTED_BIT, pdFALSE, pdFALSE, portMAX_DELAY);
-
-        app_sensors_read(&sample[idx]);
-        idx++;
-
-        if (idx == samples_per_batch) {
-            app_mqtt_send_sensor_data(sample, samples_per_batch);
-            idx = 0;
-        }
-
-        vTaskDelay(pdMS_TO_TICKS(MEASUREMENT_INTERVAL_MS));
-    }
 }
 
 static bool adc_calibration_init(adc_unit_t unit, adc_channel_t channel, adc_atten_t atten, adc_cali_handle_t *out_handle) {
