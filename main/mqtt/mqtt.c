@@ -71,9 +71,11 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
     switch ((esp_mqtt_event_id_t)event_id) {
         case MQTT_EVENT_CONNECTED:
             ESP_LOGI(TAG, "MQTT_EVENT_CONNECTED");
+            xEventGroupSetBits(app_event_group, MQTT_CONNECTED_BIT);
             break;
         case MQTT_EVENT_DISCONNECTED:
             ESP_LOGI(TAG, "MQTT_EVENT_DISCONNECTED");
+            xEventGroupClearBits(app_event_group, MQTT_CONNECTED_BIT);
 
             // if (++connection_retries >= MAX_RECONNECTION_RETRIES) {
             //     ESP_LOGI(TAG, "Max retries reached. Stopping MQTT client and allowing reprovisioning");
@@ -84,7 +86,6 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
             //     esp_mqtt_client_reconnect(client);
             // }
             // vTaskDelay(30000 / portTICK_PERIOD_MS);
-
             break;
         case MQTT_EVENT_ERROR:
             ESP_LOGI(TAG, "MQTT_EVENT_ERROR");
@@ -113,16 +114,13 @@ void app_mqtt_init(void) {
     const esp_mqtt_client_config_t mqtt_config = {
         .broker.address.uri = "mqtts://irrigo.xyz:8883",
         .broker.verification.certificate = (const char *)server_cert_pem_start,
-        .broker.verification.certificate_len = server_cert_pem_end - server_cert_pem_start,
-        // .network = {
-        //     // .disable_auto_reconnect = true
-        // },
+        // .broker.verification.certificate_len = server_cert_pem_end - server_cert_pem_start,
         .credentials = {
             .authentication = {
                 .certificate = (const char *)client_cert_pem_start,
-                .certificate_len = client_cert_pem_end - client_cert_pem_start,
+                // .certificate_len = client_cert_pem_end - client_cert_pem_start,
                 .key = (const char *)client_key_pem_start,
-                .key_len = client_key_pem_end - client_key_pem_start,
+                // .key_len = client_key_pem_end - client_key_pem_start,
             },
             .client_id = device_id
         }
@@ -144,9 +142,10 @@ void app_mqtt_task(void *pvParameters) {
     while (1) {
         xEventGroupWaitBits(app_event_group, MQTT_CONNECTED_BIT, pdFALSE, pdFALSE, portMAX_DELAY);
 
-        app_sensors_read(&batch.samples[batch.samples_count++]);
+        app_sensors_read(&batch.samples[batch.samples_count]);
+        batch.samples_count++;
         
-        if (batch.samples_count == sizeof(batch.samples) / sizeof(batch.samples[0])) {
+        if (batch.samples_count == 30) {
 
             pb_ostream_t stream = pb_ostream_from_buffer(buffer, sizeof(buffer));
             pb_encode(&stream, SampleBatch_fields, &batch);
@@ -154,7 +153,7 @@ void app_mqtt_task(void *pvParameters) {
             ESP_LOGI(TAG, "Sending %d bytes", stream.bytes_written);
             ESP_LOGI(TAG, "Sending %d samples", batch.samples_count);
 
-            // esp_mqtt_client_publish(client, "data", (const char*)buffer, SampleBatch_size, 2, 0);
+            esp_mqtt_client_publish(client, "data", (const char*)buffer, stream.bytes_written, 2, 0);
 
             batch.samples_count = 0;
         }

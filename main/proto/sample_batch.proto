@@ -1,9 +1,9 @@
-syntax = "proto3";
+syntax = "proto2";
 
 message Sample {
-    uint64 timestamp = 1;
-    float flow = 2;
-    float pressure = 3;
+    required uint64 timestamp = 1;
+    required float flow = 2;
+    required float pressure = 3;
 }
 
 message SampleBatch {

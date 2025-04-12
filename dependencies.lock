@@ -1,20 +1,21 @@
 dependencies:
-  espressif/zlib:
-    component_hash: d901723af51f13fc8e5824f39f32239c847956e8fd951a05266588dc5cfbb9ae
-    dependencies:
-    - name: idf
-      require: private
-      version: '>=4.4'
-    source:
-      registry_url: https://components.espressif.com/
-      type: service
-    version: 1.3.1
   idf:
     source:
       type: idf
-    version: 5.5.0
+    version: 5.4.1
+  nikas-belogolov/nanopb:
+    component_hash: 6ab5c72064ab6a748ad72528f007f87c7a090a893eb22fa9af5b6f112259b8c9
+    dependencies:
+    - name: idf
+      require: private
+      version: '>=5.0'
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    version: 0.4.10
 direct_dependencies:
-- espressif/zlib
-manifest_hash: c420b8699d17c2eea683879ae654683b094e7ec7d181e6e94d9c557a951e2dda
+- idf
+- nikas-belogolov/nanopb
+manifest_hash: 10ba147646d7791c79341ff836f38dff782e84a25f1385ac742a1b8f877fe146
 target: esp32
 version: 2.0.0

@@ -21,8 +21,8 @@
 #include "mqtt.h"
 #include "sensors.h"
 
-#include "mbedtls/esp_debug.h"
 #include "esp_mac.h"
+#include "esp_pm.h"
 
 static const char *TAG = "app";
 
@@ -32,6 +32,7 @@ static void wifi_init_sta(void)
 {
     /* Start Wi-Fi in station mode */
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
+    ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_MIN_MODEM)); // for low power
     ESP_ERROR_CHECK(esp_wifi_start());
 }
 
@@ -49,6 +50,16 @@ void nvs_init() {
 void app_main(void)
 {
     // esp_log_level_set("*", ESP_LOG_VERBOSE); // Set all logs to verbose
+
+    esp_pm_config_t pm_config = {
+        .max_freq_mhz = 160,
+        .min_freq_mhz = 40,  // or lower, e.g., 80
+        .light_sleep_enable = false
+    };
+    esp_err_t err = esp_pm_configure(&pm_config); // Configure power management
+    if (err != ESP_OK) {
+        ESP_LOGE("PM", "Failed to configure power management: %s", esp_err_to_name(err));
+    }
 
     /* Initialize NVS partition */
     nvs_init();
@@ -73,17 +84,20 @@ void app_main(void)
         return;
     }
 
+  
+    app_sntp_init();
+    app_sensors_init();
+    app_mqtt_init();
+    app_wifi_init();
+    app_prov_init();
+
     /* Register our event handler for Wi-Fi, IP and Provisioning related events */
     ESP_ERROR_CHECK(esp_event_handler_register(WIFI_PROV_EVENT, ESP_EVENT_ANY_ID, &prov_event_handler, NULL));
     ESP_ERROR_CHECK(esp_event_handler_register(PROTOCOMM_TRANSPORT_BLE_EVENT, ESP_EVENT_ANY_ID, &prov_event_handler, NULL));
     ESP_ERROR_CHECK(esp_event_handler_register(PROTOCOMM_SECURITY_SESSION_EVENT, ESP_EVENT_ANY_ID, &prov_event_handler, NULL));
     ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &prov_event_handler, NULL));
     
-    app_sntp_init();
-    app_sensors_init();
-    app_mqtt_init();
-    app_wifi_init();
-    app_prov_init();
+
 
     bool provisioned = false;
     ESP_ERROR_CHECK(wifi_prov_mgr_is_provisioned(&provisioned));
@@ -92,7 +106,7 @@ void app_main(void)
         app_prov_start();
     } else {
         ESP_LOGI(TAG, "Already provisioned, starting Wi-Fi STA");
-        app_prov_stop();
+        // app_prov_stop();
         ESP_ERROR_CHECK(esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, &prov_event_handler, NULL));
         wifi_init_sta();
     }

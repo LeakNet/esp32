@@ -25,7 +25,7 @@ static const char* TAG = "prov";
 #define PROV_DEVICE_ID_ENDPOINT_NAME "device-id"
 /* Signal Wi-Fi events on this event-group */
 // const int WIFI_CONNECTED_EVENT = BIT0;
-#define MAX_RETRIES 5
+#define MAX_RETRIES 3
 static int connection_retries = 0;
 
 
@@ -59,7 +59,7 @@ static esp_err_t device_id_endpoint_handler(uint32_t session_id, const uint8_t *
         ESP_LOGE(TAG, "System out of memory");
         return ESP_ERR_NO_MEM;
     }
-    *outlen = client_id_length; /* +1 for NULL terminating byte */
+    *outlen = client_id_length - 1; /* +1 for NULL terminating byte */
 
     return ESP_OK;
 }
@@ -125,7 +125,6 @@ void app_prov_start() {
 
 void app_prov_stop() {
     wifi_prov_mgr_stop_provisioning();
-    wifi_prov_mgr_deinit();
     ESP_LOGI(TAG, "Provisioning stopped");
 }
 
@@ -178,9 +177,12 @@ void prov_event_handler(void* arg, esp_event_base_t event_base,
                 if (++connection_retries >= MAX_RETRIES) {
                     ESP_LOGI(TAG, "Max retries reached. Restarting provisioning");
                     connection_retries = 0;
-                    wifi_prov_mgr_reset_sm_state_for_reprovision();
-                    // wifi_prov_mgr_reset_provisioning();
-                    // esp_restart();
+                    // app_prov_init();
+                    esp_wifi_restore();
+                    esp_restart();
+                    // wifi_prov_mgr_reset_sm_state_for_reprovision();
+                    // app_prov_start();
+                    
                 } else {
                     ESP_LOGI(TAG, "Reconnecting to WiFi...");
                     esp_wifi_connect();
