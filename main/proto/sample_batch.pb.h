@@ -10,6 +10,8 @@
 #error Regenerate this file with the current version of nanopb generator.
 #endif
 
+#define SAMPLE_BATCH_SIZE 30
+
 /* Struct definitions */
 typedef struct _Sample {
     uint64_t timestamp;
@@ -19,7 +21,7 @@ typedef struct _Sample {
 
 typedef struct _SampleBatch {
     pb_size_t samples_count;
-    Sample samples[30];
+    Sample samples[SAMPLE_BATCH_SIZE];
 } SampleBatch;
 
 

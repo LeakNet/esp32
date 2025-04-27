@@ -32,6 +32,12 @@
 #include "common.h"
 #include "prov.h"
 #include "mqtt.h"
+#include "esp_sleep.h"
+#include "driver/rtc_io.h"
+#include "ulp.h"
+#include "ulp_main.h"
+#include "esp_sleep.h"
+
 
 #define QOS0 0
 #define QOS1 1
@@ -41,6 +47,9 @@
 static int connection_retries = 0;
 
 static const char* TAG = "MQTT"; 
+
+extern const uint8_t ulp_main_bin_start[] asm("_binary_ulp_main_bin_start");
+extern const uint8_t ulp_main_bin_end[]   asm("_binary_ulp_main_bin_end");
 
 // mTLS certificates for MQTT
 extern const uint8_t client_cert_pem_start[] asm("_binary_client_crt_pem_start");
@@ -145,8 +154,7 @@ void app_mqtt_task(void *pvParameters) {
         app_sensors_read(&batch.samples[batch.samples_count]);
         batch.samples_count++;
         
-        if (batch.samples_count == 30) {
-
+        if (batch.samples_count == SAMPLE_BATCH_SIZE) {
             pb_ostream_t stream = pb_ostream_from_buffer(buffer, sizeof(buffer));
             pb_encode(&stream, SampleBatch_fields, &batch);
 
@@ -154,8 +162,44 @@ void app_mqtt_task(void *pvParameters) {
             ESP_LOGI(TAG, "Sending %d samples", batch.samples_count);
 
             esp_mqtt_client_publish(client, "data", (const char*)buffer, stream.bytes_written, 2, 0);
-
             batch.samples_count = 0;
+
+            float PressureError = 0.5;
+            int Sleep = 1;
+            for (int i = 0; i < SAMPLE_BATCH_SIZE; ++i) { if (batch.samples[i].flow != 0 || batch.samples[i].pressure < (batch.samples[0].pressure - PressureError) || batch.samples[i].pressure > (batch.samples[0].pressure - PressureError)) { Sleep = 0; break; } }
+            if (Sleep) {
+                /* Init ULP program */
+                ESP_ERROR_CHECK(ulp_load_binary(0, &(ulp_main_bin_start[0]), (ulp_main_bin_end - ulp_main_bin_start) / sizeof(uint32_t)));
+
+                gpio_num_t gpio_num = FLOW_SENSOR_PIN;
+                int rtcio_num = rtc_io_number_get(gpio_num);
+                assert(rtc_gpio_is_valid_gpio(gpio_num) && "GPIO used for pulse counting must be an RTC IO");
+
+                /* These variables exist in auto-generated ulp_main.h */
+                ulp_next_edge = 0;
+                ulp_io_number = rtcio_num;
+                ulp_edge_count_to_wake_up = 10;
+
+                /* Setup for the RTC pin */
+                rtc_gpio_init(gpio_num);
+                rtc_gpio_set_direction(gpio_num, RTC_GPIO_MODE_INPUT_ONLY);
+                rtc_gpio_pulldown_dis(gpio_num);
+                rtc_gpio_pullup_dis(gpio_num);
+                rtc_gpio_hold_en(gpio_num);
+
+#if CONFIG_IDF_TARGET_ESP32
+                rtc_gpio_isolate(GPIO_NUM_12);
+                rtc_gpio_isolate(GPIO_NUM_15);
+#endif // CONFIG_IDF_TARGET_ESP32
+
+                /* Start ULP program */
+                ulp_set_wakeup_period(0, 20000);
+                ESP_ERROR_CHECK(ulp_run(&ulp_entry - RTC_SLOW_MEM));
+
+                esp_sleep_enable_ulp_wakeup();
+                ESP_LOGI("Deep Sleep", "Deep sleep due to inactivity (f: %f, p: %f)", batch.samples[0].flow, batch.samples[0].pressure);
+                esp_deep_sleep_start();
+            }
         }
 
         vTaskDelay(pdMS_TO_TICKS(MEASUREMENT_INTERVAL_MS));

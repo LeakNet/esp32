@@ -68,9 +68,9 @@ void app_prov_init() {
 
     /* Configuration for the provisioning manager */
     wifi_prov_mgr_config_t config = {
-        .wifi_prov_conn_cfg = {
-           .wifi_conn_attempts =  3,
-        },
+        // .wifi_prov_conn_cfg = {
+        //    .wifi_conn_attempts =  3,
+        // },
         .scheme = wifi_prov_scheme_ble,
         // .scheme_event_handler = WIFI_PROV_SCHEME_BLE_EVENT_HANDLER_FREE_BTDM
         // .app_event_handler = wifi_prov_event_handler,
