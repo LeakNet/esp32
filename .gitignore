@@ -3,8 +3,11 @@
 /managed_components/
 sdkconfig.old
 dependencies.lock
+
 sdkconfig
+sdkconfig.old
 
 # ignore certificates
 /main/certs/*
+!/main/certs/ca.crt
 !/main/certs/.gitkeep

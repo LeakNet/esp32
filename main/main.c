@@ -24,7 +24,13 @@
 #include "esp_mac.h"
 #include "esp_pm.h"
 
+#include "ulp.h"
+#include "ulp_main.h"
+#include "esp_sleep.h"
+
 static const char *TAG = "app";
+
+static void init_ulp_program(void);
 
 EventGroupHandle_t app_event_group = NULL;
 
@@ -51,27 +57,26 @@ void app_main(void)
 {
     // esp_log_level_set("*", ESP_LOG_VERBOSE); // Set all logs to verbose
 
+    esp_sleep_wakeup_cause_t cause = esp_sleep_get_wakeup_cause();
+    if (cause != ESP_SLEEP_WAKEUP_ULP) {
+        printf("Not ULP wakeup, initializing ULP\n");
+        // init_ulp_program();
+    } else {
+        printf("ULP wakeup, saving pulse count\n");
+        // update_pulse_count();
+    }
+
     esp_pm_config_t pm_config = {
         .max_freq_mhz = 160,
-        .min_freq_mhz = 40,  // or lower, e.g., 80
+        .min_freq_mhz = 40,
         .light_sleep_enable = false
     };
-    esp_err_t err = esp_pm_configure(&pm_config); // Configure power management
-    if (err != ESP_OK) {
-        ESP_LOGE("PM", "Failed to configure power management: %s", esp_err_to_name(err));
-    }
+    ESP_ERROR_CHECK(esp_pm_configure(&pm_config));
 
     /* Initialize NVS partition */
     nvs_init();
 
-    uint8_t eth_mac[6];
-    esp_read_mac(eth_mac, ESP_MAC_WIFI_STA);
-
-    char client_id[11];
-    const char *client_id_prefix = "ESP-";
-    snprintf(client_id, sizeof(client_id), "%s%02X%02X%02X",
-            client_id_prefix, eth_mac[3], eth_mac[4], eth_mac[5]);
-    app_nvs_save_str(MQTT_CLIENT_ID_NVS_KEY, client_id);
+    
 
     /* Initialize TCP/IP */
     ESP_ERROR_CHECK(esp_netif_init());

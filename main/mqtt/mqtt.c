@@ -22,7 +22,7 @@
 
 #include "esp_log.h"
 
-#include <wifi_provisioning/manager.h>
+#include "wifi_provisioning/manager.h"
 
 #include <math.h>
 
@@ -32,13 +32,6 @@
 #include "common.h"
 #include "prov.h"
 #include "mqtt.h"
-
-#define QOS0 0
-#define QOS1 1
-#define QOS2 2
-
-#define MAX_RECONNECTION_RETRIES 3
-static int connection_retries = 0;
 
 static const char* TAG = "MQTT"; 
 
@@ -76,16 +69,6 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
         case MQTT_EVENT_DISCONNECTED:
             ESP_LOGI(TAG, "MQTT_EVENT_DISCONNECTED");
             xEventGroupClearBits(app_event_group, MQTT_CONNECTED_BIT);
-
-            // if (++connection_retries >= MAX_RECONNECTION_RETRIES) {
-            //     ESP_LOGI(TAG, "Max retries reached. Stopping MQTT client and allowing reprovisioning");
-            //     wifi_prov_mgr_reset_sm_state_for_reprovision();
-            //     connection_retries = 0;
-            // } else {
-            //     ESP_LOGI(TAG, "Reconnecting to MQTT broker...");
-            //     esp_mqtt_client_reconnect(client);
-            // }
-            // vTaskDelay(30000 / portTICK_PERIOD_MS);
             break;
         case MQTT_EVENT_ERROR:
             ESP_LOGI(TAG, "MQTT_EVENT_ERROR");
@@ -107,9 +90,15 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
 
 void app_mqtt_init(void) {
 
-    char device_id[12];
-    size_t device_id_length;
-    app_get_device_id(device_id, &device_id_length);
+    uint8_t eth_mac[6];
+    esp_read_mac(eth_mac, ESP_MAC_WIFI_STA);
+
+    char client_id[12];
+    const char *client_id_prefix = "ESP-";
+    snprintf(client_id,
+            sizeof(client_id), 
+            "%s%02X%02X%02X",
+            client_id_prefix, eth_mac[3], eth_mac[4], eth_mac[5]);
 
     const esp_mqtt_client_config_t mqtt_config = {
         .broker.address.uri = "mqtts://irrigo.xyz:8883",
@@ -122,7 +111,7 @@ void app_mqtt_init(void) {
                 .key = (const char *)client_key_pem_start,
                 // .key_len = client_key_pem_end - client_key_pem_start,
             },
-            .client_id = device_id
+            .client_id = client_id
         }
         
     };
@@ -135,17 +124,22 @@ void app_mqtt_start(void) {
     esp_mqtt_client_start(client);
 }
 
+// TODO: fix this
 void app_mqtt_task(void *pvParameters) {
     SampleBatch batch = SampleBatch_init_zero;
     uint8_t buffer[SampleBatch_size];
 
     while (1) {
+
+        // TODO: if disconnected from wifi, stop task and restart prov
         xEventGroupWaitBits(app_event_group, MQTT_CONNECTED_BIT, pdFALSE, pdFALSE, portMAX_DELAY);
 
         app_sensors_read(&batch.samples[batch.samples_count]);
         batch.samples_count++;
         
         if (batch.samples_count == 30) {
+
+            // TODO: if batch is static, go to deep sleep
 
             pb_ostream_t stream = pb_ostream_from_buffer(buffer, sizeof(buffer));
             pb_encode(&stream, SampleBatch_fields, &batch);

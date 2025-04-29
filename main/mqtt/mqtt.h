@@ -5,10 +5,11 @@
 #include <stddef.h>
 #include "mqtt_client.h"
 
-#define BUFFER_SIZE 100
-#define PUBLISH_INTERVAL 10000
-
 #define MQTT_CLIENT_ID_NVS_KEY "mqtt_client_id"
+
+#define QOS0 0
+#define QOS1 1
+#define QOS2 2
 
 extern esp_mqtt_client_handle_t client; 
 
