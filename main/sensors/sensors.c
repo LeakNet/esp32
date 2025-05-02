@@ -11,65 +11,82 @@
 #include <freertos/event_groups.h>
 
 #include "sensors.h"
-#include "common.h"
 #include "sample_batch.pb.h"
+#include <math.h>
+#include "driver/pulse_cnt.h"
 
 static const char* TAG = "sensors";
-
-#define ESP_INTR_FLAG_DEFAULT 0
-
-// Pin Definitions
-#define PRESSURE_SENSOR_CHANNEL ADC_CHANNEL_5 // GPIO33 (ADC1)
-#define PRESSURE_SENSOR_ADC_WIDTH ADC_BITWIDTH_12
-#define PRESSURE_SENSOR_ADC_ATTENUATION ADC_ATTEN_DB_12
-#define PRESSURE_SENSOR_ADC_MAX_VALUE ((1 << PRESSURE_SENSOR_ADC_WIDTH) - 1)
-
-#define PRESSURE_RANGE 0.5  // Maximum pressure in MPa (0–0.5MPa)
-
-/* FLOW SENSOR */
-#define FLOW_SENSOR_PIN GPIO_NUM_25
-#define FLOW_SENSOR_PULSES_PER_LITER 6.6
-#define MAX_FLOW 30
-
-volatile uint32_t flow_sensor_pulse_count = 0;
-
-void IRAM_ATTR flow_sensor_isr_handler(void *arg) {
-    flow_sensor_pulse_count++;
-}
-
-// Define the reference voltage
-#define REFERENCE_VOLTAGE 3.3
 
 static adc_oneshot_unit_handle_t adc1_handle;
 
 static adc_cali_handle_t pressure_sensor_cali_handle;
+static pcnt_unit_handle_t pcnt_unit = NULL;
 
 static bool adc_calibration_init(adc_unit_t unit, adc_channel_t channel, adc_atten_t atten, adc_cali_handle_t *out_handle);
 
-float fround(float val) {
-    int charsNeeded = 1 + snprintf(NULL, 0, "%.3f", val);
-    char* buffer = malloc(charsNeeded);
-    snprintf(buffer, charsNeeded, "%.3f", val);
-    double result = atof(buffer);
-    free(buffer);
-    return result;
+static inline float round3(float v) {
+    return roundf(v * 1000.0f) / 1000.0f;
 }
 
-float normalize_pressure(int pressure_raw) {
-    float pressure = ((float)pressure_raw / PRESSURE_SENSOR_ADC_MAX_VALUE) * PRESSURE_RANGE;
-    return fround(pressure);
+static inline float normalize_pressure(int millivolts) {
+    float voltage = millivolts / 1000.0f;
+    float pressure = voltage / PRESSURE_SENSOR_VOLTAGE_MAX;
+    return round3(pressure);
 }
 
-float normalize_flow(uint32_t pulse_count) {
-    float flow = ((float)pulse_count / (MEASUREMENT_INTERVAL_MS / 1000.0)) / FLOW_SENSOR_PULSES_PER_LITER;
-    flow = flow / MAX_FLOW;
-    return fround(flow);
+static inline float normalize_flow(uint32_t pulse_count) {
+    float flow_rate = (float)pulse_count / FLOW_SENSOR_PULSES_PER_LITER;
+    float flow_rate_norm = flow_rate / MAX_FLOW_LPM;
+    return round3(flow_rate_norm);
 }
 
-// Function to Initialize Pressure Sensor ADC
-void app_sensors_init(void) {
+static inline float pressure_sensor_read() {
+    int pressure;
+    adc_oneshot_get_calibrated_result(adc1_handle, pressure_sensor_cali_handle, PRESSURE_SENSOR_CHANNEL, &pressure);
+    return normalize_pressure(pressure);
+}
 
-    /* PRESSURE SENSOR */
+static inline float flow_sensor_read() {
+    int pulse_count;
+    pcnt_unit_get_count(pcnt_unit, &pulse_count);
+    pcnt_unit_clear_count(pcnt_unit);
+    return normalize_flow(pulse_count);
+}
+
+void flow_sensor_init(void) {
+    ESP_LOGI(TAG, "install pcnt unit");
+    pcnt_unit_config_t unit_config = {
+        .high_limit = 500,
+        .low_limit = -500,
+    };
+    
+    ESP_ERROR_CHECK(pcnt_new_unit(&unit_config, &pcnt_unit));
+
+    ESP_LOGI(TAG, "set glitch filter");
+    pcnt_glitch_filter_config_t filter_config = {
+        .max_glitch_ns = 1000,
+    };
+    ESP_ERROR_CHECK(pcnt_unit_set_glitch_filter(pcnt_unit, &filter_config));
+
+    ESP_LOGI(TAG, "install pcnt channels");
+    pcnt_chan_config_t chan_a_config = {
+        .edge_gpio_num = GPIO_NUM_25,
+        .level_gpio_num = -1,
+    };
+    pcnt_channel_handle_t pcnt_chan_a = NULL;
+    ESP_ERROR_CHECK(pcnt_new_channel(pcnt_unit, &chan_a_config, &pcnt_chan_a));
+
+    ESP_ERROR_CHECK(pcnt_channel_set_edge_action(pcnt_chan_a, PCNT_CHANNEL_EDGE_ACTION_HOLD, PCNT_CHANNEL_EDGE_ACTION_INCREASE));
+
+    ESP_LOGI(TAG, "enable pcnt unit");
+    ESP_ERROR_CHECK(pcnt_unit_enable(pcnt_unit));
+    ESP_LOGI(TAG, "clear pcnt unit");
+    ESP_ERROR_CHECK(pcnt_unit_clear_count(pcnt_unit));
+    ESP_LOGI(TAG, "start pcnt unit");
+    ESP_ERROR_CHECK(pcnt_unit_start(pcnt_unit));
+}
+
+void pressure_sensor_init(void) {
     adc_oneshot_unit_init_cfg_t init_config_adc1 = {
         .unit_id = ADC_UNIT_1,
     };
@@ -82,38 +99,23 @@ void app_sensors_init(void) {
     ESP_ERROR_CHECK(adc_oneshot_config_channel(adc1_handle, PRESSURE_SENSOR_CHANNEL, &config_adc1));
     bool do_pressure_sensor_calibration = adc_calibration_init(ADC_UNIT_1, PRESSURE_SENSOR_CHANNEL, PRESSURE_SENSOR_ADC_ATTENUATION, &pressure_sensor_cali_handle);
     ESP_LOGI(TAG, "Pressure calibrated: %d", do_pressure_sensor_calibration);
+}
 
-    /* FLOW SENSOR */
-    gpio_config_t io_conf = {
-        .pin_bit_mask = (1ULL << FLOW_SENSOR_PIN),
-        .mode = GPIO_MODE_INPUT,
-        .pull_up_en = GPIO_PULLUP_ENABLE,
-        .pull_down_en = GPIO_PULLDOWN_DISABLE,
-        .intr_type = GPIO_INTR_POSEDGE, // Detect rising edge
-    };
-    gpio_config(&io_conf);
-
-    gpio_install_isr_service(ESP_INTR_FLAG_DEFAULT);
-    gpio_isr_handler_add(FLOW_SENSOR_PIN, flow_sensor_isr_handler, NULL);
+void app_sensors_init(void) {
+    pressure_sensor_init();
+    flow_sensor_init();
 }
 
 void app_sensors_read(Sample* sample) {
-
-    /* PRESSURE */
-    int raw_pressure;
-
-    ESP_ERROR_CHECK(adc_oneshot_get_calibrated_result(adc1_handle, pressure_sensor_cali_handle, PRESSURE_SENSOR_CHANNEL, &raw_pressure));
 
     struct timeval tv;
     gettimeofday(&tv, NULL);
 
     sample->timestamp = ((uint64_t)tv.tv_sec * 1000);
-    sample->pressure = normalize_pressure(raw_pressure);
-    sample->flow = normalize_flow(flow_sensor_pulse_count);
+    sample->pressure = pressure_sensor_read();
+    sample->flow = flow_sensor_read();
 
-    ESP_LOGI(TAG, "Timestamp: %llu, Pressure: %.4f MPa, Flow: %.4f Liter/Minute", sample->timestamp, sample->pressure, sample->flow);
-
-    flow_sensor_pulse_count = 0;
+    ESP_LOGI(TAG, "Timestamp: %llu, Pressure: %.4f, Flow: %.4f", sample->timestamp, sample->pressure, sample->flow);
 }
 
 static bool adc_calibration_init(adc_unit_t unit, adc_channel_t channel, adc_atten_t atten, adc_cali_handle_t *out_handle) {
@@ -129,7 +131,7 @@ static bool adc_calibration_init(adc_unit_t unit, adc_channel_t channel, adc_att
             .unit_id = unit,
             .chan = channel,
             .atten = atten,
-            .bitwidth = ADC_BITWIDTH_DEFAULT,
+            .bitwidth = PRESSURE_SENSOR_ADC_WIDTH,
         };
         ret = adc_cali_create_scheme_curve_fitting(&cali_config, &handle);
         if (ret == ESP_OK) {
@@ -144,7 +146,7 @@ static bool adc_calibration_init(adc_unit_t unit, adc_channel_t channel, adc_att
         adc_cali_line_fitting_config_t cali_config = {
             .unit_id = unit,
             .atten = atten,
-            .bitwidth = ADC_BITWIDTH_DEFAULT,
+            .bitwidth = PRESSURE_SENSOR_ADC_WIDTH,
         };
         ret = adc_cali_create_scheme_line_fitting(&cali_config, &handle);
         if (ret == ESP_OK) {

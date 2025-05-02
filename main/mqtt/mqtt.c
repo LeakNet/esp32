@@ -32,18 +32,20 @@
 #include "common.h"
 #include "prov.h"
 #include "mqtt.h"
+#include "esp_sleep.h"
+#include "driver/rtc_io.h"
+#include "ulp.h"
+#include "ulp_main.h"
+#include "esp_sleep.h"
 
 static const char* TAG = "MQTT"; 
 
-// mTLS certificates for MQTT
-extern const uint8_t client_cert_pem_start[] asm("_binary_client_crt_pem_start");
-extern const uint8_t client_cert_pem_end[] asm("_binary_client_crt_pem_end");
-
-extern const uint8_t client_key_pem_start[] asm("_binary_client_key_pem_start");
-extern const uint8_t client_key_pem_end[] asm("_binary_client_key_pem_end");
-
-extern const uint8_t server_cert_pem_start[] asm("_binary_ca_crt_pem_start");
-extern const uint8_t server_cert_pem_end[] asm("_binary_ca_crt_pem_end");
+extern const uint8_t client_cert_pem_start[] asm("_binary_client_crt_start");
+extern const uint8_t client_cert_pem_end[] asm("_binary_client_crt_end");
+extern const uint8_t client_key_pem_start[] asm("_binary_client_key_start");
+extern const uint8_t client_key_pem_end[] asm("_binary_client_key_end");
+extern const uint8_t server_cert_pem_start[] asm("_binary_ca_crt_start");
+extern const uint8_t server_cert_pem_end[] asm("_binary_ca_crt_end");
 
 esp_mqtt_client_handle_t client;
 
@@ -54,13 +56,10 @@ static void log_error_if_nonzero(const char *message, int error_code)
     }
 }
 
-
 static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_t event_id, void *event_data)
 {
-    // ESP_LOGD(TAG, "Event dispatched from event loop base=%s, event_id=%d", base, event_id);
     esp_mqtt_event_handle_t event = event_data;
-    esp_mqtt_client_handle_t client = event->client;
-    // int msg_id;
+
     switch ((esp_mqtt_event_id_t)event_id) {
         case MQTT_EVENT_CONNECTED:
             ESP_LOGI(TAG, "MQTT_EVENT_CONNECTED");
@@ -78,7 +77,7 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
                 log_error_if_nonzero("captured as transport's socket errno",  event->error_handle->esp_transport_sock_errno);
                 ESP_LOGI(TAG, "Last errno string (%s)", strerror(event->error_handle->esp_transport_sock_errno));
             } else if (event->error_handle->error_type == MQTT_ERROR_TYPE_CONNECTION_REFUSED) {
-                ESP_LOGI(TAG, "Failed to connect to ");
+                ESP_LOGI(TAG, "Failed to connect to MQTT broker.");
             }
             
             break;
@@ -90,30 +89,18 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
 
 void app_mqtt_init(void) {
 
-    uint8_t eth_mac[6];
-    esp_read_mac(eth_mac, ESP_MAC_WIFI_STA);
-
-    char client_id[12];
-    const char *client_id_prefix = "ESP-";
-    snprintf(client_id,
-            sizeof(client_id), 
-            "%s%02X%02X%02X",
-            client_id_prefix, eth_mac[3], eth_mac[4], eth_mac[5]);
+    const char* device_id = app_get_device_id();
 
     const esp_mqtt_client_config_t mqtt_config = {
-        .broker.address.uri = "mqtts://irrigo.xyz:8883",
+        .broker.address.uri = CONFIG_MQTT_BROKER_URL,
         .broker.verification.certificate = (const char *)server_cert_pem_start,
-        // .broker.verification.certificate_len = server_cert_pem_end - server_cert_pem_start,
         .credentials = {
             .authentication = {
                 .certificate = (const char *)client_cert_pem_start,
-                // .certificate_len = client_cert_pem_end - client_cert_pem_start,
                 .key = (const char *)client_key_pem_start,
-                // .key_len = client_key_pem_end - client_key_pem_start,
             },
-            .client_id = client_id
+            .client_id = device_id
         }
-        
     };
 
     client = esp_mqtt_client_init(&mqtt_config);
@@ -124,22 +111,34 @@ void app_mqtt_start(void) {
     esp_mqtt_client_start(client);
 }
 
-// TODO: fix this
+bool should_stay_awake(SampleBatch* batch) {
+    for (int i = 0; i < SAMPLE_BATCH_SIZE; ++i)
+    {
+        if (batch->samples[i].flow != 0)
+            return true;
+
+        if (batch->samples[i].pressure > PRESSURE_MIN_VALUE)
+            return true;
+    }
+
+    return false;
+}
+
+// TODO: test if deep sleep works
 void app_mqtt_task(void *pvParameters) {
     SampleBatch batch = SampleBatch_init_zero;
     uint8_t buffer[SampleBatch_size];
 
     while (1) {
 
-        // TODO: if disconnected from wifi, stop task and restart prov
-        xEventGroupWaitBits(app_event_group, MQTT_CONNECTED_BIT, pdFALSE, pdFALSE, portMAX_DELAY);
 
         app_sensors_read(&batch.samples[batch.samples_count]);
         batch.samples_count++;
         
-        if (batch.samples_count == 30) {
+        if (batch.samples_count == SAMPLE_BATCH_SIZE) {
 
-            // TODO: if batch is static, go to deep sleep
+            // TODO: find better way to do this
+            xEventGroupWaitBits(app_event_group, MQTT_CONNECTED_BIT, pdFALSE, pdFALSE, portMAX_DELAY);
 
             pb_ostream_t stream = pb_ostream_from_buffer(buffer, sizeof(buffer));
             pb_encode(&stream, SampleBatch_fields, &batch);
@@ -147,8 +146,18 @@ void app_mqtt_task(void *pvParameters) {
             ESP_LOGI(TAG, "Sending %d bytes", stream.bytes_written);
             ESP_LOGI(TAG, "Sending %d samples", batch.samples_count);
 
-            esp_mqtt_client_publish(client, "data", (const char*)buffer, stream.bytes_written, 2, 0);
+            if (!should_stay_awake(&batch)) {
+                ESP_LOGI(TAG, "Deep sleep due to inactivity");
 
+            #if CONFIG_IDF_TARGET_ESP32
+                rtc_gpio_isolate(FLOW_SENSOR_PIN);
+            #endif
+
+                ESP_ERROR_CHECK(ulp_run(&ulp_entry - RTC_SLOW_MEM));
+                esp_deep_sleep_start();
+            }
+
+            esp_mqtt_client_publish(client, "data", (const char*)buffer, stream.bytes_written, QOS1, NO_RETAIN);
             batch.samples_count = 0;
         }
 
